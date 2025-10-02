@@ -29,9 +29,17 @@ jobs:
 
       - name: Create RDP User with Secure Password
         run: |
-          # Generate strong random password
+          # Generate strong random password using .NET methods
           Add-Type -AssemblyName System.Web
-          $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+          try {
+              $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+          } catch {
+              # Fallback password generation method
+              Write-Host "Using fallback password generation..."
+              $charSet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
+              $password = -join ((1..16) | ForEach-Object { $charSet[(Get-Random -Maximum $charSet.Length)] })
+          }
+          
           $securePass = ConvertTo-SecureString $password -AsPlainText -Force
           
           # Create user account
@@ -43,11 +51,17 @@ jobs:
           echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
           
           Write-Host "User RDPUser created successfully"
+          Write-Host "Password: $password"
 
       - name: Get Public IP Address
         run: |
-          # Get public IP address
-          $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org").Trim()
+          # Get public IP address with error handling
+          try {
+              $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 10).Trim()
+          } catch {
+              Write-Host "Failed to get public IP from api.ipify.org, trying alternative..."
+              $publicIP = (Invoke-RestMethod -Uri "https://ifconfig.me/ip" -TimeoutSec 10).Trim()
+          }
           echo "PUBLIC_IP=$publicIP" >> $env:GITHUB_ENV
           Write-Host "Public IP Address: $publicIP"
 
