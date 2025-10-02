@@ -1,4 +1,4 @@
-name: Public RDP
+name: Public RDP Fixed
 
 on:
   workflow_dispatch:
@@ -11,59 +11,100 @@ jobs:
     steps:
       - name: Configure Core RDP Settings
         run: |
-          # Enable Remote Desktop
+          # Enable Remote Desktop with proper configuration
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
                              -Name "fDenyTSConnections" -Value 0 -Force
+          
+          # Configure RDP security settings
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "UserAuthentication" -Value 0 -Force
+                             -Name "UserAuthentication" -Value 1 -Force  # Keep NLA enabled for security
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
-                             -Name "SecurityLayer" -Value 0 -Force
+                             -Name "SecurityLayer" -Value 1 -Force
 
-          # Configure firewall to allow RDP
+          # Configure firewall properly
           netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
-          netsh advfirewall firewall add rule name="RDP-Public" `
+          netsh advfirewall firewall add rule name="RDP-Public-TCP" `
             dir=in action=allow protocol=TCP localport=3389
+          netsh advfirewall firewall add rule name="RDP-Public-UDP" `
+            dir=in action=allow protocol=UDP localport=3389
 
-          # Restart Terminal Services
+          # Restart services
           Restart-Service -Name TermService -Force
+          Restart-Service -Name SessionEnv -ErrorAction SilentlyContinue
+          Restart-Service -Name UmRdpService -ErrorAction SilentlyContinue
 
       - name: Create RDP User with Secure Password
         run: |
-          # Generate strong random password using .NET methods
-          Add-Type -AssemblyName System.Web
-          try {
-              $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
-          } catch {
-              # Fallback password generation method
-              Write-Host "Using fallback password generation..."
-              $charSet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'
-              $password = -join ((1..16) | ForEach-Object { $charSet[(Get-Random -Maximum $charSet.Length)] })
-          }
+          # Simple and reliable password generation
+          $charSets = @(
+              'ABCDEFGHIJKLMNOPQRSTUVWXYZ',
+              'abcdefghijklmnopqrstuvwxyz', 
+              '0123456789',
+              '!@#$%^&*'
+          )
           
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          $password = -join (
+              $charSets | ForEach-Object { 
+                  $_.ToCharArray() | Get-Random -Count 4 
+              }
+          )
+          
+          # Convert to char array and shuffle
+          $passwordChars = $password.ToCharArray()
+          $shuffledPassword = -join ($passwordChars | Sort-Object { Get-Random })
+          
+          $securePass = ConvertTo-SecureString $shuffledPassword -AsPlainText -Force
+          
+          # Remove existing user if any
+          Remove-LocalUser -Name "RDPUser" -ErrorAction SilentlyContinue
           
           # Create user account
           New-LocalUser -Name "RDPUser" -Password $securePass -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
           
-          # Store credentials in environment variable
-          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          # Enable the user account
+          Enable-LocalUser -Name "RDPUser"
           
-          Write-Host "User RDPUser created successfully"
-          Write-Host "Password: $password"
+          echo "RDP_PASSWORD=$shuffledPassword" >> $env:GITHUB_ENV
+          Write-Host "User RDPUser created with password: $shuffledPassword"
 
-      - name: Get Public IP Address
+      - name: Get Network Information
         run: |
-          # Get public IP address with error handling
+          # Get public IP address
           try {
               $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org" -TimeoutSec 10).Trim()
           } catch {
               Write-Host "Failed to get public IP from api.ipify.org, trying alternative..."
               $publicIP = (Invoke-RestMethod -Uri "https://ifconfig.me/ip" -TimeoutSec 10).Trim()
           }
+          
+          # Get local IP information
+          $localIP = (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.InterfaceAlias -eq "Ethernet" -or $_.InterfaceAlias -eq "Ethernet 2"} | Select-Object -First 1).IPAddress
+          
           echo "PUBLIC_IP=$publicIP" >> $env:GITHUB_ENV
+          echo "LOCAL_IP=$localIP" >> $env:GITHUB_ENV
+          
           Write-Host "Public IP Address: $publicIP"
+          Write-Host "Local IP Address: $localIP"
+
+      - name: Verify RDP Configuration
+        run: |
+          Write-Host "=== RDP Service Status ==="
+          Get-Service -Name TermService
+          
+          Write-Host "`n=== Firewall Rules ==="
+          netsh advfirewall firewall show rule name="RDP-Public-TCP"
+          netsh advfirewall firewall show rule name="RDP-Public-UDP"
+          
+          Write-Host "`n=== Listening Ports ==="
+          netstat -an | findstr ":3389"
+          
+          Write-Host "`n=== User Account ==="
+          Get-LocalUser -Name "RDPUser"
+          
+          Write-Host "`n=== Testing Local RDP Connection ==="
+          Test-NetConnection -ComputerName 127.0.0.1 -Port 3389
 
       - name: Display Connection Information
         run: |
@@ -71,29 +112,40 @@ jobs:
           Write-Host "================================================"
           Write-Host "            RDP CONNECTION INFORMATION"
           Write-Host "================================================"
-          Write-Host "IP Address:    $env:PUBLIC_IP"
+          Write-Host "Public IP:     $env:PUBLIC_IP"
+          Write-Host "Local IP:      $env:LOCAL_IP"
           Write-Host "Username:      RDPUser"
           Write-Host "Password:      $env:RDP_PASSWORD"
           Write-Host "Port:          3389"
           Write-Host "================================================"
           Write-Host "`n"
-          Write-Host "How to connect:"
-          Write-Host "1. Open Remote Desktop Connection (mstsc.exe)"
-          Write-Host "2. Enter: $env:PUBLIC_IP"
-          Write-Host "3. Use username: RDPUser"
-          Write-Host "4. Use the password shown above"
+          Write-Host "Troubleshooting Tips:"
+          Write-Host "1. Make sure your network allows outbound RDP connections"
+          Write-Host "2. Try both IP addresses if one doesn't work"
+          Write-Host "3. Check if your firewall is blocking the connection"
+          Write-Host "4. Ensure you're using the exact username 'RDPUser'"
           Write-Host "`n"
 
       - name: Keep Runner Active
         run: |
-          Write-Host "RDP service is running and accessible from public internet..."
-          Write-Host "This runner will stay active for 60 hours or until manually stopped."
-          Write-Host "Press Ctrl+C in the workflow to terminate early."
+          Write-Host "RDP service is running..."
+          Write-Host "Public IP: $env:PUBLIC_IP"
+          Write-Host "Local IP: $env:LOCAL_IP"
+          Write-Host "Username: RDPUser"
+          Write-Host "Password: $env:RDP_PASSWORD"
+          Write-Host "`nThis runner will stay active for 60 hours or until manually stopped."
           
-          # Display connection info every 5 minutes
+          # Display status every 2 minutes
           $counter = 0
           while ($true) {
               $counter++
-              Write-Host "[$(Get-Date)] RDP Active - Session $counter - IP: $env:PUBLIC_IP"
-              Start-Sleep -Seconds 300
+              Write-Host "[$(Get-Date)] RDP Active - Session $counter"
+              # Test local connectivity
+              $testResult = Test-NetConnection -ComputerName 127.0.0.1 -Port 3389 -WarningAction SilentlyContinue
+              if ($testResult.TcpTestSucceeded) {
+                  Write-Host "✓ RDP port 3389 is listening locally"
+              } else {
+                  Write-Host "✗ RDP port 3389 is not accessible locally"
+              }
+              Start-Sleep -Seconds 120
           }
