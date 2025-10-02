@@ -1,0 +1,85 @@
+name: Public RDP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  public-rdp:
+    runs-on: windows-latest
+    timeout-minutes: 3600
+
+    steps:
+      - name: Configure Core RDP Settings
+        run: |
+          # Enable Remote Desktop
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+                             -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+                             -Name "SecurityLayer" -Value 0 -Force
+
+          # Configure firewall to allow RDP
+          netsh advfirewall firewall set rule group="remote desktop" new enable=Yes
+          netsh advfirewall firewall add rule name="RDP-Public" `
+            dir=in action=allow protocol=TCP localport=3389
+
+          # Restart Terminal Services
+          Restart-Service -Name TermService -Force
+
+      - name: Create RDP User with Secure Password
+        run: |
+          # Generate strong random password
+          Add-Type -AssemblyName System.Web
+          $password = [System.Web.Security.Membership]::GeneratePassword(16, 4)
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+          
+          # Create user account
+          New-LocalUser -Name "RDPUser" -Password $securePass -AccountNeverExpires
+          Add-LocalGroupMember -Group "Administrators" -Member "RDPUser"
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDPUser"
+          
+          # Store credentials in environment variable
+          echo "RDP_PASSWORD=$password" >> $env:GITHUB_ENV
+          
+          Write-Host "User RDPUser created successfully"
+
+      - name: Get Public IP Address
+        run: |
+          # Get public IP address
+          $publicIP = (Invoke-RestMethod -Uri "https://api.ipify.org").Trim()
+          echo "PUBLIC_IP=$publicIP" >> $env:GITHUB_ENV
+          Write-Host "Public IP Address: $publicIP"
+
+      - name: Display Connection Information
+        run: |
+          Write-Host "`n"
+          Write-Host "================================================"
+          Write-Host "            RDP CONNECTION INFORMATION"
+          Write-Host "================================================"
+          Write-Host "IP Address:    $env:PUBLIC_IP"
+          Write-Host "Username:      RDPUser"
+          Write-Host "Password:      $env:RDP_PASSWORD"
+          Write-Host "Port:          3389"
+          Write-Host "================================================"
+          Write-Host "`n"
+          Write-Host "How to connect:"
+          Write-Host "1. Open Remote Desktop Connection (mstsc.exe)"
+          Write-Host "2. Enter: $env:PUBLIC_IP"
+          Write-Host "3. Use username: RDPUser"
+          Write-Host "4. Use the password shown above"
+          Write-Host "`n"
+
+      - name: Keep Runner Active
+        run: |
+          Write-Host "RDP service is running and accessible from public internet..."
+          Write-Host "This runner will stay active for 60 hours or until manually stopped."
+          Write-Host "Press Ctrl+C in the workflow to terminate early."
+          
+          # Display connection info every 5 minutes
+          $counter = 0
+          while ($true) {
+              $counter++
+              Write-Host "[$(Get-Date)] RDP Active - Session $counter - IP: $env:PUBLIC_IP"
+              Start-Sleep -Seconds 300
+          }
